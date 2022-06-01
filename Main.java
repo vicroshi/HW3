@@ -611,8 +611,9 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
      * f5 -> "}"
      */
     @Override
-    public String visit(ClassDeclaration n, String argu) throws Exception {
-
+    public String visit(ClassDeclaration n, String scope) throws Exception {
+        String classname = n.f1.accept(this,scope);
+        n.f4.accept(this,classname);
         return null;
     }
 
@@ -650,8 +651,25 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
      * f12 -> "}"
      */
     @Override
-    public String visit(MethodDeclaration n, String argu) throws Exception {
+    public String visit(MethodDeclaration n, String scope) throws Exception {
         rcounter = 0;
+        String classname = scope;
+        String methodname = n.f2.accept(this,scope);
+        ArrayList<MethInfo> vtable = DeclVisitor.vtables.get(classname);
+        String methodtype = convertTypes(DeclVisitor.methdec.get(classname).get(methodname));
+        String params = n.f4.accept(this,scope);
+        fos.printf("define %s @%s(i8* %%this, %s) {\n",methodtype,classname+"."+methodname,params);
+        for(String param : params.split(",")){
+            String paramname = param.split(" ")[1];
+            String paramtype = param.split(" ")[0];
+            String reg1 = newReg(paramname.replace("%.",""),true);
+            fos.printf("  %s = alloca %s\n",reg1,paramtype);
+            fos.printf("  store %s, %s* %s\n",param,paramtype,reg1);
+        }
+        n.f7.accept(this,scope+"::"+methodname);
+        n.f8.accept(this,scope+"::"+methodname);
+        String exp = n.f10.accept(this,scope+"::"+methodname);
+        fos.printf("ret %s\n}\n",exp);
         return null;
     }
 
@@ -695,6 +713,19 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
         }
         return ret;
     }
+
+    /**
+     * f0 -> Type()
+     * f1 -> Identifier()
+     */
+    @Override
+    public String visit(FormalParameter n,String argu) throws Exception{
+        String type = n.f0.accept(this, null);
+        String name = n.f1.accept(this, null);
+
+        return type + " " + "%." + name;
+    }
+
     /**
      * f0 -> Type()
      * f1 -> Identifier()
@@ -916,6 +947,34 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
 
     /**
      * Grammar production:
+     * f0 -> PrimaryExpression()
+     * f1 -> "."
+     * f2 -> "length"
+     */
+    public String visit(ArrayLength n, String scope) throws Exception{ //check for array length
+        String arr = n.f0.accept(this,scope);
+        String arrtype = arr.split(" ")[0];
+        String arrname = arr.split(" ")[1];
+        fos.printf("  %s = getelementptr %s %s* i32 0\n");
+        return null;
+    }
+
+    /**
+     * Grammar production:
+     * f0 -> PrimaryExpression()
+     * f1 -> "."
+     * f2 -> Identifier()
+     * f3 -> "("
+     * f4 -> ( ExpressionList() )?
+     * f5 -> ")"
+     */
+    public String visit(MessageSend n, String scope) throws Exception{
+
+        return null;
+    }
+
+    /**
+     * Grammar production:
      * f0 -> IntegerLiteral()
      *       | TrueLiteral()
      *       | FalseLiteral()
@@ -931,7 +990,8 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
             String rtype = loadVar(scope,pexp).split(" ")[0];
             String rname = loadVar(scope,pexp).split(" ")[1];
             String reg = newReg(null,false);
-            fos.printf("  %s = load %s, %s* %s\n",reg,rtype,rtype,rname);
+            System.out.println(rtype);
+            fos.printf("  %s = load %s, %s %s\n",reg,rtype.substring(0,rtype.length()-1),rtype,rname);
             return rtype+" "+reg;
         }
         return pexp;

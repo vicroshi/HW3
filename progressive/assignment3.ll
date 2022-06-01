@@ -13,7 +13,7 @@ define i32 @main() {
   %_2 = sub i32 %_1, 4
   %_3 = mul i32 %_2, 2
   store i32 %_3, i32* %a
-  %_4 = load i32*, i32** %a
+  %_4 = load i32, i32* %a
   call void (i32) @print_int(%_4)
   store i1 1, i1* %b
   %_5 = icmp slt i32 10, 0
@@ -37,7 +37,7 @@ define i32 @main() {
   %_16 = getelementptr [1 x i8*], [1 x i8*]* @.A_vtable, i32 0, i32 0
   store i8** %_16, i8*** %_15
   store i8* %_14, i8** %e
-  %_17 = load i32*, i32** %a
+  %_17 = load i32, i32* %a
   %_18 = icmp slt i32* %_17, 0
   br i1 %_18, label %arr_alloc19, label %arr_alloc20
 
@@ -57,3 +57,9 @@ define i32 @main() {
   store %_BooleanArray* %_22, %_BooleanArray** %d
   ret i32 0
 }
+define %_IntegerArray* @A.foo(i8* %this, %_BooleanArray* %.a) {
+  %a = alloca %_BooleanArray*
+  store %_BooleanArray* %.a, %_BooleanArray** %a
+  %b = alloca %_IntegerArray*
+  %_0 = load %_BooleanArray*, %_BooleanArray** %a
+  
