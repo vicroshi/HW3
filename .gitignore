@@ -1,0 +1,11 @@
+.idea/
+out/
+syntaxtree/
+visitor/
+javacc/
+minijava-examples-new/
+minijava-testsuite/
+*.class
+*.txt
+Example.java
+minijava-jtb.jj
