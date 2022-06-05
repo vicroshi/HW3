@@ -7,5 +7,6 @@ minijava-examples-new/
 minijava-testsuite/
 *.class
 *.txt
+out1
 Example.java
 minijava-jtb.jj

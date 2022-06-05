@@ -4,6 +4,7 @@ import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.lang.reflect.Array;
 import java.text.ParseException;
 import java.util.*;
 
@@ -496,12 +497,17 @@ class DeclVisitor extends GJDepthFirst<String,String>{
 class CodeGenVisitor extends GJDepthFirst<String,String>{
 
     private  int rcounter;
+    private Stack<String> labels;
+
+    private Set<String> basictypes;
 
     private int arraytype_size; //i32->4 bytes + i1*|i32* ->8bytes
     private PrintWriter fos;
     public CodeGenVisitor(PrintWriter f){
         fos = f;
         arraytype_size = 12; //i32->4 bytes + i1*|i32* ->8bytes
+        labels = new Stack<String>();
+        basictypes = new HashSet<String>(Arrays.asList("i32","i1","%_IntegerArray*","%_BooleanArray*"));
     }
     private int getClassSize(String name) {
         int sz = 0;
@@ -546,7 +552,9 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
             return "%_"+rcounter++;
         }
         else if(!var){
-            return "%"+name+rcounter++;
+            String label = "%"+name+rcounter++;
+            labels.push(label);
+            return label;
         }
         else {
             return "%"+name;
@@ -596,6 +604,25 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
             }
             fos.printf("@.%s_vtable = global [%d x i8*] [%s]\n",e.getKey(),size,contents);
         }
+        fos.println("declare i8* @calloc(i32, i32)\n" +
+                "declare i32 @printf(i8*, ...)\n" +
+                "declare void @exit(i32)\n" +
+                "\n" +
+                "@_cint = constant [4 x i8] c\"%d\\0a\\00\"\n" +
+                "@_cOOB = constant [15 x i8] c\"Out of bounds\\0a\\00\"\n" +
+                "\n" +
+                "define void @print_int(i32 %i) {\n" +
+                "\t%_str = bitcast [4 x i8]* @_cint to i8*\n" +
+                "\tcall i32 (i8*, ...) @printf(i8* %_str, i32 %i)\n" +
+                "\tret void\n" +
+                "}\n" +
+                "\n" +
+                "define void @throw_oob() {\n" +
+                "\t%_str = bitcast [15 x i8]* @_cOOB to i8*\n" +
+                "\tcall i32 (i8*, ...) @printf(i8* %_str)\n" +
+                "\tcall void @exit(i32 1)\n" +
+                "\tret void\n" +
+                "}\n");
         fos.printf("define i32 @main() {\n");
         n.f14.accept(this,classname+"::main");
         n.f15.accept(this,classname+"::main");
@@ -669,7 +696,7 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
         n.f7.accept(this,scope+"::"+methodname);
         n.f8.accept(this,scope+"::"+methodname);
         String exp = n.f10.accept(this,scope+"::"+methodname);
-        fos.printf("ret %s\n}\n",exp);
+        fos.printf("  ret %s\n}\n",exp);
         return null;
     }
 
@@ -721,8 +748,10 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
     @Override
     public String visit(FormalParameter n,String argu) throws Exception{
         String type = n.f0.accept(this, null);
+        if(!basictypes.contains(type)){
+            type = "i8*";
+        }
         String name = n.f1.accept(this, null);
-
         return type + " " + "%." + name;
     }
 
@@ -764,8 +793,8 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
         String exp = n.f2.accept(this,scope); //returns string "type register"
 //        String exptype = exp.split(" ")[0];
 //        String expname = exp.split(" ")[1];
-        String reg = loadVar(scope,name);
-        fos.printf("  store %s, %s\n",exp,reg);
+        String var = loadVar(scope,name);
+        fos.printf("  store %s, %s\n",exp,var);
 //        if(DeclVisitor.vardec.get(scope).containsKey(name)){
 //            reg = newReg(name,true);
 //            fos.printf("  store %s, %s* %s\n",exp,exptype,reg);
@@ -775,6 +804,61 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
 //        }
         return null;
     }
+
+    /**
+     * Grammar production:
+     * f0 -> Identifier()
+     * f1 -> "["
+     * f2 -> Expression()
+     * f3 -> "]"
+     * f4 -> "="
+     * f5 -> Expression()
+     * f6 -> ";"
+     */
+    public String visit(ArrayAssignmentStatement n, String scope) throws Exception{
+        String name = n.f0.accept(this,scope);
+        String arrptr = loadVar(scope,name);
+        String arrptrtype = arrptr.split(" ")[0];
+        String arrname = newReg(null,false);
+        String arrtype = arrptrtype.substring(0,arrptrtype.length()-1);
+        String arr = arrtype +" "+ arrname;
+        fos.printf("  %s = load %s, %s\n",arrname,arrtype,arrptr);
+        String lenptr = newReg(null,false);
+        fos.printf("  %s = getelementptr %s, %s, i32 0, i32 0\n",lenptr,arrtype.substring(0,arrtype.length()-1),arr);
+        String len = newReg(null,false);
+        fos.printf("  %s = load i32, i32* %s\n",len,lenptr);
+        String lessthan = newReg(null,false);
+        String idx = n.f2.accept(this,scope);
+        String idxname = idx.split(" ")[1];
+        fos.printf("  %s = icmp slt i32 %s, %s\n",lessthan,idxname,len);
+        String greaterthan = newReg(null,false);
+        fos.printf("  %s = icmp sge %s, 0\n",greaterthan,idx);
+        String inbounds = newReg(null,false);
+        fos.printf("  %s = and i1 %s, %s\n",inbounds,greaterthan,lessthan);
+        String ooblabel = newReg("out_of_bounds",false);
+        String looklabel = newReg("arr_look",false);
+        fos.printf("  br i1 %s, label %s, label %s\n",inbounds, looklabel,ooblabel);
+        fos.printf("\n%s:\n",ooblabel.substring(1));
+        fos.printf("  call void @throw_oob()\n  br label %s\n",looklabel);
+        fos.printf("\n%s:\n",looklabel.substring(1));
+        String arrayptr = newReg(null,false);
+        fos.printf("  %s = getelementptr %s, %s, i32 0, i32 1\n",arrayptr,arrtype.substring(0,arrtype.length()-1),arr);
+        String array = newReg(null,false);
+        String arraytype;
+        if ("%_IntegerArray*".equals(arrtype)){
+            arraytype = "i32*";
+        }
+        else {
+            arraytype = "i1*";
+        }
+        fos.printf("  %s = load %s , %s* %s\n",array,arraytype,arraytype,arrayptr);
+        String elementptr = newReg(null,false);
+        fos.printf("  %s = getelementptr %s, %s %s, %s\n",elementptr,arraytype.substring(0,arraytype.length()-1),arraytype,array,idx);
+        String exp = n.f5.accept(this,scope);
+        fos.printf("  store %s, %s %s\n",exp,arraytype,elementptr);
+        return null;
+    }
+
 
     //Expressions
     /**
@@ -823,7 +907,13 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
      * f2 -> PrimaryExpression()
      */
     public String visit(CompareExpression n, String scope) throws Exception{
-        return null;
+        String lexp = n.f0.accept(this,scope);
+        String lexpname = lexp.split(" ")[1];
+        String rexp = n.f2.accept(this,scope);
+        String rexpname = rexp.split(" ")[1];
+        String compare = newReg(null,false);
+        fos.printf("  %s = icmp slt i32 %s, %s\n",compare,lexpname,rexpname);
+        return "i1 "+compare;
     }
     /**
      * f0 -> Clause()
@@ -831,9 +921,80 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
      * f2 -> Clause()
      */
     public String visit(AndExpression n, String scope) throws Exception{
+        String lexp = n.f0.accept(this,scope);
+//        String lexpname = lexp.split(" ")[1];
+        String label1 = newReg("andclause",false);
+        String label2 = newReg("andclause",false);
+        String label3 = newReg("andclause",false);
+        fos.printf("  br %s, label %s, label %s\n",lexp,label1,label2);
+        fos.printf("\n%s:\n",label2.substring(1));
+        fos.printf("  br label %s\n",label3);
+        fos.printf("\n%s:\n",label1.substring(1));
+        String rexp = n.f2.accept(this,scope);
+        String rexpname = rexp.split(" ")[1];
+        fos.printf("  br label %s\n",label3);
+        fos.printf("\n%s:\n",label3.substring(1));
+        String phi = newReg(null,false);
+        fos.printf("  %s = phi i1 [0, %s], [%s, %s]\n",phi,label2,rexpname,labels.pop());
+        return "i1 " + phi;
+    }
+
+    /**
+     * Grammar production:
+     * f0 -> "if"
+     * f1 -> "("
+     * f2 -> Expression()
+     * f3 -> ")"
+     * f4 -> Statement()
+     * f5 -> "else"
+     * f6 -> Statement()
+     */
+
+    public String visit(IfStatement n, String scope) throws Exception{
+        String cond = n.f2.accept(this,scope);
+        System.out.println(cond);
+        String condname = cond.split(" ")[1];
+        String if_body = newReg("if",false);
+        String else_body = newReg("else",false);
+        String exit = newReg("exit_if",false);
+        fos.printf("  br i1 %s, label %s, label %s\n",condname,if_body,else_body);
+        fos.printf("\n%s:\n",if_body.substring(1));
+        n.f4.accept(this,scope);
+        fos.printf("  br label %s",exit);
+        fos.printf("\n%s:\n",else_body.substring(1));
+        n.f6.accept(this,scope);
+        fos.printf("  br label %s",exit);
+        fos.printf("\n%s:\n",exit.substring(1));
         return null;
     }
 
+
+    /**
+     * Grammar production:
+     * f0 -> "while"
+     * f1 -> "("
+     * f2 -> Expression()
+     * f3 -> ")"
+     * f4 -> Statement()
+     */
+    public String visit(WhileStatement n,String scope) throws  Exception{
+        String while_loop = newReg("while",false);
+        String while_body = newReg("body",false);
+        String exit = newReg("exit_while",false);
+        fos.printf("  br label %s\n",while_loop);
+        fos.printf("\n%s:\n",while_loop.substring(1));
+        String cond = n.f2.accept(this,scope);
+        String condname = cond.split(" ")[1];
+//        String neg_cond = newReg(null,false);
+//        fos.printf("  %s = xor i1 1, %s",neg_cond,condname);
+        fos.printf("  br i1 %s, label %s, label %s\n",condname,while_body,exit);
+        fos.printf("\n%s:\n",while_body.substring(1));
+//        fos.printf("call void (i32) @print_int(i32 )\n",)
+        n.f4.accept(this,scope);
+        fos.printf("  br label %s",while_loop);
+        fos.printf("\n%s:\n",exit.substring(1));
+        return null;
+    }
     /**
      * Grammar production:
      * f0 -> "System.out.println"
@@ -844,7 +1005,7 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
      */
     public String visit(PrintStatement n, String scope) throws Exception{
         String exp = n.f2.accept(this,scope).split(" ")[1];
-        fos.printf("  call void (i32) @print_int(%s)\n",exp);
+        fos.printf("  call void (i32) @print_int(i32 %s)\n",exp);
         return null;
     }
     /**
@@ -866,14 +1027,15 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
      */
     public String visit(BooleanArrayAllocationExpression n, String scope) throws Exception {
         String exp = n.f3.accept(this,scope);
+        String expname = exp.split(" ")[1];
         String reg1 = newReg(null,false);
-        fos.printf("  %s = icmp slt %s, 0\n",reg1,exp);
+        fos.printf("  %s = icmp slt i32 %s, 0\n",reg1,expname);
         String label1 = newReg("arr_alloc",false);
         String label2 = newReg("arr_alloc",false);
         fos.printf("  br i1 %s, label %s, label %s\n",reg1,label1,label2);
-        fos.printf("\n%s:\n  call void @throw_oob()\n  br label %s\n",label1,label2);
+        fos.printf("\n%s:\n  call void @throw_oob()\n  br label %s\n",label1.substring(1),label2);
         String reg2 = newReg(null,false);
-        fos.printf("\n%s:\n  %s = call i8* @calloc(i32 1,i32 %d)\n",label2,reg2,arraytype_size);
+        fos.printf("\n%s:\n  %s = call i8* @calloc(i32 1,i32 %d)\n",label2.substring(1),reg2,arraytype_size);
         String reg3 = newReg(null,false); //register with booleanarray pointer
         fos.printf("  %s = bitcast i8* %s to %%_BooleanArray*\n",reg3,reg2);
         String reg4 = newReg(null,false);
@@ -885,7 +1047,7 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
         fos.printf("  %s = bitcast i8* %s to i1*\n",reg6,reg5);
         String reg7 = newReg(null,false);
         fos.printf("  %s = getelementptr %%_BooleanArray, %%_BooleanArray* %s, i32 0, i32 1\n",reg7,reg3);
-        fos.printf("  store i1* %s, i1** %s\n",reg5,reg6);
+        fos.printf("  store i1* %s, i1** %s\n",reg6,reg7);
         return "%_BooleanArray* "+reg3;
     }
 
@@ -899,27 +1061,78 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
      */
     public String visit(IntegerArrayAllocationExpression n,String scope) throws Exception {
         String exp = n.f3.accept(this,scope);
+        String expname = exp.split(" ")[1];
         String reg1 = newReg(null,false);
-        fos.printf("  %s = icmp slt %s, 0\n",reg1,exp);
+        fos.printf("  %s = icmp slt i32 %s, 0\n",reg1,expname);
         String label1 = newReg("arr_alloc",false);
         String label2 = newReg("arr_alloc",false);
         fos.printf("  br i1 %s, label %s, label %s\n",reg1,label1,label2);
-        fos.printf("\n%s:\n  call void @throw_oob()\n  br label %s\n",label1,label2);
+        fos.printf("\n%s:\n" +
+                "  call void @throw_oob()\n  br label %s\n",label1.substring(1),label2);
         String reg2 = newReg(null,false);
-        fos.printf("\n%s:\n  %s = call i8* @calloc(i32 1,i32 %d)\n",label2,reg2,arraytype_size);
+        fos.printf("\n%s:\n  " +
+                "%s = call i8* @calloc(i32 1,i32 %d)\n",label2.substring(1),reg2,arraytype_size);
         String reg3 = newReg(null,false); //register with integerarray pointer
         fos.printf("  %s = bitcast i8* %s to %%_IntegerArray*\n",reg3,reg2);
         String reg4 = newReg(null,false);
         fos.printf("  %s = getelementptr %%_IntegerArray, %%_IntegerArray* %s, i32 0, i32 0\n",reg4,reg3); // get pointer to array size
-        fos.printf("  store %s, i32* %s",exp,reg4);
+        fos.printf("  store %s, i32* %s\n",exp,reg4);
         String reg5 = newReg(null,false);
         fos.printf("  %s = call i8* @calloc(%s, i32 4)\n",reg5,exp);
         String reg6 = newReg(null,false);
         fos.printf("  %s = bitcast i8* %s to i32*\n",reg6,reg5);
         String reg7 = newReg(null,false);
         fos.printf("  %s = getelementptr %%_IntegerArray, %%_IntegerArray* %s, i32 0, i32 1\n",reg7,reg3);
-        fos.printf("  store i32* %s, i32** %s\n",reg5,reg6);
+        fos.printf("  store i32* %s, i32** %s\n",reg6,reg7);
         return "%_IntegerArray* "+reg3;
+    }
+
+    /**
+     * Grammar production:
+     * f0 -> PrimaryExpression()
+     * f1 -> "["
+     * f2 -> PrimaryExpression()
+     * f3 -> "]"
+     */
+    public String visit(ArrayLookup n, String scope) throws Exception {
+        String arr = n.f0.accept(this,scope);
+        String arrtype = arr.split(" ")[0];
+        String arrname = arr.split(" ")[1];
+        String lenptr = newReg(null,false);
+        fos.printf("  %s = getelementptr %s, %s, i32 0, i32 0\n",lenptr,arrtype.substring(0,arrtype.length()-1),arr);
+        String len = newReg(null,false);
+        fos.printf("  %s = load i32, i32* %s\n",len,lenptr);
+        String lessthan = newReg(null,false);
+        String idx = n.f2.accept(this,scope);
+        String idxname = idx.split(" ")[1];
+        fos.printf("  %s = icmp slt i32 %s, %s\n",lessthan,idxname,len);
+        String greaterthan = newReg(null,false);
+        fos.printf("  %s = icmp sge %s, 0\n",greaterthan,idx);
+        String inbounds = newReg(null,false);
+        fos.printf("  %s = and i1 %s, %s\n",inbounds,greaterthan,lessthan);
+        String ooblabel = newReg("out_of_bounds",false);
+        String looklabel = newReg("arr_look",false);
+        fos.printf("\n  br i1 %s, label %s, label %s\n",inbounds, looklabel,ooblabel);
+        fos.printf("\n%s:\n",ooblabel.substring(1));
+        fos.printf("  call void @throw_oob()\n  br label %s\n",looklabel);
+        fos.printf("\n%s:\n",looklabel.substring(1));
+        String arrayptr = newReg(null,false);
+        fos.printf("  %s = getelementptr %s, %s, i32 0, i32 1\n",arrayptr,arrtype.substring(0,arrtype.length()-1),arr);
+        String array = newReg(null,false);
+        String arraytype;
+        if ("%_IntegerArray*".equals(arrtype)){
+            arraytype = "i32*";
+        }
+        else {
+            arraytype = "i1*";
+        }
+        fos.printf("  %s = load %s , %s* %s\n",array,arraytype,arraytype,arrayptr);
+        String elementptr = newReg(null,false);
+        fos.printf("  %s = getelementptr %s, %s %s, %s\n",elementptr,arraytype.substring(0,arraytype.length()-1),arraytype,array,idx);
+        String element = newReg(null,false);
+        String elementtype = arraytype.substring(0,arraytype.length()-1);
+        fos.printf("  %s = load %s, %s* %s\n",element,elementtype,elementtype,elementptr);
+        return elementtype + " " + element;
     }
 
     /**
@@ -955,8 +1168,12 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
         String arr = n.f0.accept(this,scope);
         String arrtype = arr.split(" ")[0];
         String arrname = arr.split(" ")[1];
-        fos.printf("  %s = getelementptr %s %s* i32 0\n");
-        return null;
+//        fos.printf("  %s")
+        String reg1 = newReg(null,false);
+        fos.printf("  %s = getelementptr %s, %s, i32 0, i32 0\n",reg1,arrtype.substring(0,arrtype.length()-1),arr);
+        String reg2 = newReg(null,false);
+        fos.printf("  %s = load i32, i32* %s\n",reg2,reg1);
+        return "i32 " + reg2;
     }
 
     /**
@@ -986,13 +1203,15 @@ class CodeGenVisitor extends GJDepthFirst<String,String>{
      */
     public String visit(PrimaryExpression n, String scope) throws Exception{
         String pexp = n.f0.accept(this,scope);
+//        System.out.println(pexp);
         if(pexp.split(" ").length == 1){
-            String rtype = loadVar(scope,pexp).split(" ")[0];
-            String rname = loadVar(scope,pexp).split(" ")[1];
+            String var = loadVar(scope,pexp);
+            String rtype = var.split(" ")[0];
+            String rname = var.split(" ")[1];
             String reg = newReg(null,false);
-            System.out.println(rtype);
+//            System.out.println(rtype);
             fos.printf("  %s = load %s, %s %s\n",reg,rtype.substring(0,rtype.length()-1),rtype,rname);
-            return rtype+" "+reg;
+            return rtype.substring(0,rtype.length()-1)+" "+reg;
         }
         return pexp;
     }
